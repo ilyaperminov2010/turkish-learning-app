@@ -19,19 +19,35 @@ let apiKey = '';
 export function stripMarkdown(text) {
     let cleaned = text.trim();
     
-    // Удаляем ```json ... ``` или ``` ... ``` или ` ... `
-    const patterns = [
-        /^```json\s*([\s\S]*?)\s*```$/,
-        /^```\s*([\s\S]*?)\s*```$/,
-        /^`([\s\S]*?)`$/
-    ];
+    // Удаляем ```json ... ``` или ``` ... ``` (более гибкие паттерны)
+    // Паттерн 1: ```json\n...\n``` или ```json ...\n```
+    const jsonBlockMatch = cleaned.match(/^```json\s*\n?([\s\S]*?)\n?```\s*$/);
+    if (jsonBlockMatch) {
+        return jsonBlockMatch[1].trim();
+    }
     
-    for (const pattern of patterns) {
-        const match = cleaned.match(pattern);
-        if (match) {
-            cleaned = match[1].trim();
-            break;
-        }
+    // Паттерн 2: ```\n...\n```
+    const codeBlockMatch = cleaned.match(/^```\s*\n?([\s\S]*?)\n?```\s*$/);
+    if (codeBlockMatch) {
+        return codeBlockMatch[1].trim();
+    }
+    
+    // Паттерн 3: Ищем JSON внутри текста с markdown
+    const jsonInTextMatch = cleaned.match(/```json\s*\n?([\s\S]*?)\n?```/);
+    if (jsonInTextMatch) {
+        return jsonInTextMatch[1].trim();
+    }
+    
+    // Паттерн 4: Просто ``` без json
+    const codeInTextMatch = cleaned.match(/```\s*\n?([\s\S]*?)\n?```/);
+    if (codeInTextMatch) {
+        return codeInTextMatch[1].trim();
+    }
+    
+    // Паттерн 5: Одинарные бэктики
+    const singleBacktickMatch = cleaned.match(/^`([\s\S]*?)`$/);
+    if (singleBacktickMatch) {
+        return singleBacktickMatch[1].trim();
     }
     
     return cleaned;
@@ -62,12 +78,32 @@ export function getKey() {
  * @returns {string} - промпт
  */
 export function buildPrompt(topic) {
+    // Специальные инструкции для разных категорий
+    const categoryInstructions = {
+        culture: `Для культурной темы сгенерируй фразы и выражения, связанные с турецкой культурой.
+Включи:
+- Традиционные выражения и поговорки
+- Фразы для культурных ситуаций
+- Слова и термины, связанные с темой
+- Типичные диалоги в культурном контексте`,
+        grammar: `Для грамматической темы сгенерируй примеры, демонстрирующие грамматическое правило.
+Включи разнообразные примеры использования в разных контекстах.`,
+        vocabulary: `Для лексической темы сгенерируй слова и фразы по теме.
+Включи как отдельные слова, так и устойчивые выражения.`,
+        phonetics: `Для фонетической темы сгенерируй слова и фразы, демонстрирующие звуковые особенности.
+Включи примеры с разными вариантами произношения.`
+    };
+
+    const categoryInstruction = categoryInstructions[topic.category] || '';
+
     return `Сгенерируй учебный контент для изучения турецкого языка.
 
 Тема: ${topic.name}
 Уровень: ${topic.level}
 Категория: ${topic.category}
 Описание: ${topic.description}
+
+${categoryInstruction}
 
 Сгенерируй 25-35 фраз (chunks) для изучения. Каждая фраза должна быть связана с темой.
 
@@ -87,9 +123,10 @@ export function buildPrompt(topic) {
   * "Bir şey değil" → "Не за что" (НЕ "Это не вещь")
   * "Kolay gelsin" → "Удачи в работе" (НЕ "Пусть будет легко")
 
-ФОРМАТ ОТВЕТА:
+ФОРМАТ ОТВЕТА - СТРОГО СОБЛЮДАЙ:
 Верни ТОЛЬКО чистый JSON без markdown-форматирования.
 НЕ оборачивай ответ в \`\`\`json или \`\`\`.
+НЕ добавляй никакого текста до или после JSON.
 
 {
   "chunks": [
@@ -116,37 +153,97 @@ export function buildPrompt(topic) {
  */
 export function parseResponse(response) {
     try {
+        // Проверяем наличие кандидатов
+        if (!response.candidates || response.candidates.length === 0) {
+            // Проверяем причину блокировки
+            if (response.promptFeedback?.blockReason) {
+                throw new Error(`Content blocked: ${response.promptFeedback.blockReason}`);
+            }
+            throw new Error('No candidates in API response');
+        }
+
+        // Проверяем причину завершения
+        const candidate = response.candidates[0];
+        if (candidate.finishReason && candidate.finishReason !== 'STOP') {
+            console.warn('Finish reason:', candidate.finishReason);
+            if (candidate.finishReason === 'SAFETY') {
+                throw new Error('Content blocked by safety filters');
+            }
+            if (candidate.finishReason === 'MAX_TOKENS') {
+                console.warn('Response may be truncated due to max tokens');
+            }
+        }
+
         // Получаем текст из ответа Gemini
-        const text = response.candidates?.[0]?.content?.parts?.[0]?.text;
+        const text = candidate.content?.parts?.[0]?.text;
         
         if (!text) {
             throw new Error('Empty response from API');
         }
 
         // Очищаем от markdown-форматирования
-        const cleanedJson = stripMarkdown(text);
-
-        const parsed = JSON.parse(cleanedJson);
+        let cleanedJson = stripMarkdown(text);
         
-        // Валидация структуры
-        if (!parsed.chunks || !Array.isArray(parsed.chunks)) {
+        // Пытаемся найти JSON в тексте если он не парсится напрямую
+        let parsed;
+        try {
+            parsed = JSON.parse(cleanedJson);
+        } catch (jsonError) {
+            // Пробуем найти JSON объект в тексте
+            const jsonMatch = cleanedJson.match(/\{[\s\S]*"chunks"[\s\S]*\}/);
+            if (jsonMatch) {
+                parsed = JSON.parse(jsonMatch[0]);
+            } else {
+                // Пробуем найти массив chunks напрямую
+                const arrayMatch = cleanedJson.match(/\[[\s\S]*\]/);
+                if (arrayMatch) {
+                    parsed = { chunks: JSON.parse(arrayMatch[0]) };
+                } else {
+                    throw new Error('Could not find valid JSON in response: ' + jsonError.message);
+                }
+            }
+        }
+        
+        // Валидация структуры - пробуем разные варианты
+        let chunks = parsed.chunks;
+        
+        // Если chunks нет, проверяем альтернативные названия
+        if (!chunks || !Array.isArray(chunks)) {
+            // Проверяем альтернативные ключи
+            const altKeys = ['items', 'phrases', 'content', 'data', 'results'];
+            for (const key of altKeys) {
+                if (parsed[key] && Array.isArray(parsed[key])) {
+                    chunks = parsed[key];
+                    break;
+                }
+            }
+        }
+        
+        // Если всё ещё нет chunks, проверяем является ли сам parsed массивом
+        if (!chunks && Array.isArray(parsed)) {
+            chunks = parsed;
+        }
+        
+        if (!chunks || !Array.isArray(chunks) || chunks.length === 0) {
+            console.error('Response structure:', JSON.stringify(parsed, null, 2).substring(0, 500));
             throw new Error('Invalid response structure: missing chunks array');
         }
 
-        // Добавляем ID если отсутствует
-        parsed.chunks = parsed.chunks.map((chunk, index) => ({
+        // Добавляем ID если отсутствует и нормализуем структуру
+        const normalizedChunks = chunks.map((chunk, index) => ({
             id: chunk.id || `chunk_${index}`,
-            turkish: chunk.turkish || '',
-            russian: chunk.russian || '',
-            example: chunk.example || '',
-            exampleTranslation: chunk.exampleTranslation || '',
-            grammarNote: chunk.grammarNote || null,
+            turkish: chunk.turkish || chunk.phrase || chunk.text || '',
+            russian: chunk.russian || chunk.translation || chunk.meaning || '',
+            example: chunk.example || chunk.sentence || '',
+            exampleTranslation: chunk.exampleTranslation || chunk.sentenceTranslation || '',
+            grammarNote: chunk.grammarNote || chunk.note || chunk.grammar || null,
             words: chunk.words || []
         }));
 
-        return parsed;
+        return { chunks: normalizedChunks };
     } catch (error) {
         console.error('Parse error:', error);
+        console.error('Raw response:', JSON.stringify(response, null, 2).substring(0, 1000));
         throw new Error('Failed to parse API response: ' + error.message);
     }
 }

@@ -144,7 +144,7 @@ export function getSettings() {
     const defaults = {
         theme: 'light',
         soundEnabled: true,
-        apiKey: 'AIzaSyBmmTMJbEKPZ5aHUliDcJ-6goVHS7qKTiA',
+        apiKey: '',
         ttsVoice: 'Kore',
         ttsEnabled: true,
         speakingRate: 0.8
