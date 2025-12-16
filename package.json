@@ -1,0 +1,18 @@
+{
+  "name": "turkish-learning-app",
+  "version": "1.0.0",
+  "description": "Приложение для изучения турецкого языка с интерактивными играми",
+  "type": "module",
+  "scripts": {
+    "start": "npx serve -l 3000",
+    "dev": "npx vite --host",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
+  },
+  "devDependencies": {
+    "vitest": "^1.6.0",
+    "fast-check": "^3.15.0",
+    "jsdom": "^24.0.0"
+  }
+}
